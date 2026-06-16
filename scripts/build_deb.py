@@ -13,7 +13,7 @@ ARCHITECTURE = "amd64"
 INSTALL_DIR = Path("/opt") / PACKAGE_NAME
 EXECUTABLE_NAME = "ApplicationManager"
 ICON_NAME = PACKAGE_NAME
-STARTUP_WM_CLASS = "ApplicationManager"
+STARTUP_WM_CLASS = "Applicationmanager"
 MAINTAINER = "Home"
 DESCRIPTION = "Packaged desktop application."
 

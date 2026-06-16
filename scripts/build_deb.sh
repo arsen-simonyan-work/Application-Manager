@@ -51,6 +51,7 @@ Type=Application
 Name=$DISPLAY_NAME
 Exec=/usr/bin/$NAME
 Icon=$NAME
+StartupWMClass=Applicationmanager
 Terminal=false
 Categories=Utility;
 EOF
