@@ -170,7 +170,7 @@ object LinuxBackend {
 
     fun scan(onProgress: (Int, Int) -> Unit = { _, _ -> }): ScanResult {
         val records = (desktopEntries() + snapEntries() + flatpakEntries() + wineEntries())
-            .sortedWith(compareBy<AppRecord>(String.CASE_INSENSITIVE_ORDER) { it.name }
+            .sortedWith(compareBy<AppRecord> { it.name.lowercase(Locale.ROOT) }
                 .thenBy { it.group }.thenBy { it.path }.thenBy { it.entry }.thenBy { it.exec })
             .mapIndexed { index, rec -> rec.copy(listKey = "$index|${rec.group}|${rec.path}|${rec.entry}") }
         val unique = linkedMapOf<Pair<String, String>, AppRecord>()
