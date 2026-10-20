@@ -15,7 +15,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -99,7 +98,7 @@ private fun ApplicationManager() {
                     Text("Shown: ${items.size}", style = MaterialTheme.typography.labelMedium)
                     HorizontalDivider()
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxSize()) {
-                        items(items, key = { "${it.group}|${it.path}|${it.entry}|${it.exec}" }) { rec ->
+                        items(items, key = { it.listKey }) { rec ->
                             AppRow(rec, isSelected = selected == rec, onClick = { selected = rec }, onOpen = { action { LinuxBackend.launch(rec) } })
                         }
                     }

@@ -19,7 +19,9 @@ data class AppRecord(
     val exec: String,
     val path: String,
     val icon: String = "",
-    val reason: String = ""
+    val reason: String = "",
+    /** Stable and unique within a scan; retained in duplicate copies and filtered tabs. */
+    val listKey: String = ""
 )
 
 data class ScanResult(val all: List<AppRecord>, val unique: List<AppRecord>, val duplicates: List<AppRecord>) {
@@ -111,21 +113,25 @@ object LinuxBackend {
         return if (firstCommand >= 0) tokens.drop(firstCommand + 1) else emptyList()
     }
 
+    /** Only .desktop launchers represent applications, never arbitrary directories. */
+    private fun desktopRecord(file: File, group: String): AppRecord? {
+        val fields = parseDesktop(file)
+        if (fields["Type"]?.let { it != "Application" } == true ||
+            bool(fields["NoDisplay"]) || bool(fields["Hidden"])) return null
+        val exec = fields["Exec"].orEmpty()
+        val executable = launchTokens(exec).firstOrNull()
+        if (executable?.startsWith('/') == true && !File(executable).exists()) return null
+        return AppRecord(
+            localized(fields, "Name").ifBlank { file.nameWithoutExtension },
+            group, file.name, exec, file.absolutePath, fields["Icon"].orEmpty()
+        )
+    }
+
     private fun desktopEntries(): List<AppRecord> = locations.flatMap { (folder, group) ->
-        File(folder).listFiles { f -> f.isFile && f.extension == "desktop" }?.toList().orEmpty().mapNotNull { file ->
-            try {
-                val m = parseDesktop(file)
-                if (m["Type"]?.let { it != "Application" } == true || bool(m["NoDisplay"]) || bool(m["Hidden"])) null
-                else {
-                    val exec = m["Exec"].orEmpty()
-                    val executable = launchTokens(exec).firstOrNull()
-                    if (executable?.startsWith('/') == true && !File(executable).exists()) null
-                    else AppRecord(localized(m, "Name").ifBlank { file.nameWithoutExtension },
-                        if (file.path.startsWith("$userDesktop/wine/")) "Wine" else group,
-                        file.name, exec, file.absolutePath, m["Icon"].orEmpty())
-                }
-            } catch (_: Exception) { null }
-        }
+        File(folder).listFiles { file -> file.isFile && file.extension.equals("desktop", ignoreCase = true) }
+            ?.toList().orEmpty().mapNotNull { file ->
+                try { desktopRecord(file, group) } catch (_: Exception) { null }
+            }
     }
 
     private fun snapEntries(): List<AppRecord> {
@@ -138,23 +144,35 @@ object LinuxBackend {
     }
 
     private fun flatpakEntries(): List<AppRecord> {
-        val (code, output) = command("flatpak", "list", "--app", "--columns=application")
+        // Ask Flatpak for its user-facing name as well as the stable application ID.
+        val (code, output) = command("flatpak", "list", "--app", "--columns=application,name")
         if (code != 0) return emptyList()
-        return output.lines().mapNotNull { id ->
-            id.trim().takeIf(String::isNotBlank)?.let { AppRecord(it, "Flatpak", "$it.flatpakref", "flatpak run $it", "") }
+        return output.lines().mapNotNull { line ->
+            val columns = line.trim().split('\t', limit = 2)
+            val id = columns.firstOrNull()?.trim().orEmpty()
+            if (id.isBlank()) null
+            else AppRecord(columns.getOrNull(1)?.trim()?.takeIf(String::isNotBlank) ?: id,
+                "Flatpak", "$id.flatpakref", "flatpak run $id", "")
         }
     }
 
     private fun wineEntries(): List<AppRecord> {
-        val prefix = System.getenv("WINEPREFIX") ?: "$home/.wine"
-        return listOf("Program Files", "Program Files (x86)")
-            .flatMap { File("$prefix/drive_c/$it").listFiles()?.filter(File::isDirectory).orEmpty() }
-            .map { AppRecord(it.name, "Wine", "${it.name}.wine", "", "") }
+        // Wine's Program Files folders include shared components such as "Common Files".
+        // Scan actual Wine-created .desktop launchers instead of guessing from folders.
+        val wineLaunchers = File(userDesktop, "wine")
+        if (!wineLaunchers.isDirectory) return emptyList()
+        return wineLaunchers.walkTopDown().maxDepth(8)
+            .filter { it.isFile && it.extension.equals("desktop", ignoreCase = true) }
+            .mapNotNull { file ->
+                try { desktopRecord(file, "Wine") } catch (_: Exception) { null }
+            }.toList()
     }
 
     fun scan(onProgress: (Int, Int) -> Unit = { _, _ -> }): ScanResult {
         val records = (desktopEntries() + snapEntries() + flatpakEntries() + wineEntries())
-            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+            .sortedWith(compareBy<AppRecord>(String.CASE_INSENSITIVE_ORDER) { it.name }
+                .thenBy { it.group }.thenBy { it.path }.thenBy { it.entry }.thenBy { it.exec })
+            .mapIndexed { index, rec -> rec.copy(listKey = "$index|${rec.group}|${rec.path}|${rec.entry}") }
         val unique = linkedMapOf<Pair<String, String>, AppRecord>()
         val duplicates = mutableListOf<AppRecord>()
         records.forEachIndexed { index, rec ->
@@ -173,8 +191,8 @@ object LinuxBackend {
     fun launch(rec: AppRecord) {
         val args = when {
             rec.exec.isNotBlank() -> launchTokens(rec.exec)
-            rec.group == "Snap" -> listOf("snap", "run", rec.name)
-            rec.group == "Flatpak" -> listOf("flatpak", "run", rec.name)
+            rec.group == "Snap" -> listOf("snap", "run", nativeId(rec))
+            rec.group == "Flatpak" -> listOf("flatpak", "run", nativeId(rec))
             rec.group == "Wine" -> listOf("wine", "uninstaller")
             else -> emptyList()
         }
