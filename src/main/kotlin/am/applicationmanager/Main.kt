@@ -34,7 +34,14 @@ fun main() = application {
         title = "Application Manager",
         state = rememberWindowState(placement = WindowPlacement.Maximized)
     ) {
-        MaterialTheme(colorScheme = darkColorScheme()) { ApplicationManager() }
+        MaterialTheme(colorScheme = darkColorScheme()) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                ApplicationManager()
+            }
+        }
     }
 }
 
@@ -124,16 +131,7 @@ private fun ApplicationManager() {
             unit.active, unit.startup).any { it.contains(search, ignoreCase = true) })
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Application Manager", style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold)
-            Spacer(Modifier.weight(1f))
-            if (appBusy || serviceBusy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            OutlinedButton(onClick = {
-                if (section == Section.Services) refreshServices() else refreshApps()
-            }, enabled = !appBusy && !serviceBusy) { Text("Rescan") }
-        }
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Surface(Modifier.width(208.dp).fillMaxHeight(), shape = RoundedCornerShape(16.dp),
                 tonalElevation = 2.dp) {
@@ -161,6 +159,20 @@ private fun ApplicationManager() {
                         Section.Services -> "System and user background services"
                     }, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (section == Section.Services) refreshServices() else refreshApps()
+                        },
+                        enabled = !appBusy && !serviceBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (appBusy || serviceBusy) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text("Rescan")
+                    }
                     Spacer(Modifier.weight(1f))
                     Text("${apps.applications.size} applications", style = MaterialTheme.typography.labelSmall)
                     Text("${apps.launchers.size} launchers", style = MaterialTheme.typography.labelSmall)
