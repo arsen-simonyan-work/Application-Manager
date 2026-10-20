@@ -38,126 +38,319 @@ fun main() = application {
     }
 }
 
+private enum class Section(val title: String) {
+    Applications("Applications"), Launchers("Launchers"), Services("Services")
+}
+private data class RemoveRequest(val record: AppRecord, val launcherOnly: Boolean)
+
 @Composable
 private fun ApplicationManager() {
-    var currentTab by remember { mutableStateOf("All") }
-    var query by remember { mutableStateOf("") }
-    var selected by remember { mutableStateOf<AppRecord?>(null) }
-    var result by remember { mutableStateOf(ScanResult(emptyList(), emptyList(), emptyList())) }
-    var busy by remember { mutableStateOf(false) }
+    var section by remember { mutableStateOf(Section.Applications) }
+    var filter by remember { mutableStateOf("All") }
+    var search by remember { mutableStateOf("") }
+    var selectedApp by remember { mutableStateOf<String?>(null) }
+    var selectedLauncher by remember { mutableStateOf<String?>(null) }
+    var selectedService by remember { mutableStateOf<String?>(null) }
+    var apps by remember { mutableStateOf(ApplicationCatalog(emptyList(), emptyList(), emptyList())) }
+    var services by remember { mutableStateOf<ServiceCatalog?>(null) }
+    var appBusy by remember { mutableStateOf(false) }
+    var serviceBusy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Ready") }
-    var prompt by remember { mutableStateOf<AppRecord?>(null) }
-    var info by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var removing by remember { mutableStateOf<RemoveRequest?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun reload() {
-        if (busy) return
-        busy = true
-        status = "Scanning applications…"
-        selected = null
+    fun refreshApps() {
+        if (appBusy) return
+        appBusy = true
+        status = "Scanning installed applications and launchers…"
         scope.launch {
             try {
-                result = withContext(Dispatchers.IO) { LinuxBackend.scan() }
-                status = "Found ${result.all.size} entries • ${result.unique.size} unique • ${result.duplicates.size} duplicates"
-            } catch (e: Exception) { info = "Scanning failed: ${e.message}"; status = "Scan failed" }
-            finally { busy = false }
+                apps = withContext(Dispatchers.IO) { CatalogScanner.from(LinuxBackend.scan()) }
+                status = "${apps.applications.size} applications, ${apps.launchers.size} launchers"
+            } catch (e: Exception) { message = e.message ?: e.toString() }
+            finally { appBusy = false }
         }
     }
-
-    fun action(block: () -> Unit) {
-        try { block() } catch (e: Exception) { info = e.message ?: e.toString() }
+    fun refreshServices() {
+        if (serviceBusy) return
+        serviceBusy = true
+        status = "Scanning services…"
+        scope.launch {
+            try {
+                services = withContext(Dispatchers.IO) { ServiceScanner.scan() }
+                status = "${services?.services?.size ?: 0} systemd services"
+            } catch (e: Exception) { message = e.message ?: e.toString() }
+            finally { serviceBusy = false }
+        }
+    }
+    fun launch(rec: AppRecord) {
+        try { LinuxBackend.launch(rec) }
+        catch (e: Exception) { message = e.message ?: e.toString() }
+    }
+    fun openFolder(rec: AppRecord) {
+        try { LinuxBackend.openFolder(rec) }
+        catch (e: Exception) { message = e.message ?: e.toString() }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    LaunchedEffect(Unit) { refreshApps() }
+    LaunchedEffect(section) {
+        if (section == Section.Services && services == null) refreshServices()
+    }
 
-    val items = remember(result, currentTab, query) {
-        val needle = query.trim().lowercase()
-        result.forTab(currentTab).filter { rec ->
-            needle.isEmpty() || listOf(rec.name, rec.group, rec.entry, rec.exec, rec.path)
-                .any { it.contains(needle, ignoreCase = true) }
+    val filters = when (section) {
+        Section.Services -> listOf("All", "Running", "Stopped", "Failed", "System", "User")
+        Section.Launchers -> listOf("All", "Duplicates", "System", "User", "Snap", "Flatpak", "Wine")
+        Section.Applications -> listOf("All", "System", "User", "Snap", "Flatpak", "Wine")
+    }
+    val appItems = apps.applications.filter { entry ->
+        (filter == "All" || filter == entry.source) &&
+            (search.isBlank() || listOf(entry.name, entry.source, entry.id)
+                .any { it.contains(search, ignoreCase = true) })
+    }
+    val launcherItems = (if (filter == "Duplicates") apps.duplicateLaunchers
+        else apps.launchers.filter { filter == "All" || it.group == filter })
+        .filter { rec -> search.isBlank() || listOf(rec.name, rec.exec, rec.path, rec.group)
+            .any { it.contains(search, ignoreCase = true) } }
+    val serviceItems = services?.services.orEmpty().filter { unit ->
+        val matched = when (filter) {
+            "All" -> true
+            "Running" -> unit.active == "active"
+            "Stopped" -> unit.active !in setOf("active", "failed")
+            "Failed" -> unit.active == "failed"
+            else -> unit.scope == filter
         }
+        matched && (search.isBlank() || listOf(unit.name, unit.scope, unit.description,
+            unit.active, unit.startup).any { it.contains(search, ignoreCase = true) })
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Application Manager", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Application Manager", style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            OutlinedButton(onClick = { reload() }, enabled = !busy) { Text("Rescan") }
+            if (appBusy || serviceBusy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            OutlinedButton(onClick = {
+                if (section == Section.Services) refreshServices() else refreshApps()
+            }, enabled = !appBusy && !serviceBusy) { Text("Rescan") }
         }
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Surface(modifier = Modifier.weight(1f).fillMaxHeight(), shape = RoundedCornerShape(16.dp), tonalElevation = 2.dp) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Applications", fontWeight = FontWeight.SemiBold)
-                    ScrollableTabRow(selectedTabIndex = allTabs.indexOf(currentTab).coerceAtLeast(0), edgePadding = 0.dp) {
-                        allTabs.forEach { name ->
-                            Tab(selected = currentTab == name, onClick = { currentTab = name; selected = null },
-                                text = { Text(name, maxLines = 1) })
+            Surface(Modifier.width(208.dp).fillMaxHeight(), shape = RoundedCornerShape(16.dp),
+                tonalElevation = 2.dp) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("SECTIONS", style = MaterialTheme.typography.labelMedium)
+                    Section.entries.forEach { entry ->
+                        if (section == entry) {
+                            FilledTonalButton(onClick = {}, modifier = Modifier.fillMaxWidth()) {
+                                Text(entry.title, modifier = Modifier.fillMaxWidth())
+                            }
+                        } else {
+                            TextButton(onClick = {
+                                section = entry
+                                filter = "All"
+                                search = ""
+                            }, modifier = Modifier.fillMaxWidth()) {
+                                Text(entry.title, modifier = Modifier.fillMaxWidth())
+                            }
                         }
                     }
-                    OutlinedTextField(query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(),
-                        singleLine = true, label = { Text("Search by name, group, command or path") },
-                        trailingIcon = { if (query.isNotEmpty()) TextButton(onClick = { query = "" }) { Text("Clear") } })
-                    Text("Shown: ${items.size}", style = MaterialTheme.typography.labelMedium)
                     HorizontalDivider()
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxSize()) {
-                        items(items, key = { it.listKey }) { rec ->
-                            AppRow(rec, isSelected = selected == rec, onClick = { selected = rec }, onOpen = { action { LinuxBackend.launch(rec) } })
+                    Text(when (section) {
+                        Section.Applications -> "Installed GUI programs"
+                        Section.Launchers -> "Desktop shortcut files"
+                        Section.Services -> "System and user background services"
+                    }, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.weight(1f))
+                    Text("${apps.applications.size} applications", style = MaterialTheme.typography.labelSmall)
+                    Text("${apps.launchers.size} launchers", style = MaterialTheme.typography.labelSmall)
+                    Text("${services?.services?.size ?: "—"} services",
+                        style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            Surface(Modifier.weight(1f).fillMaxHeight(), shape = RoundedCornerShape(16.dp),
+                tonalElevation = 2.dp) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(section.title, fontWeight = FontWeight.SemiBold)
+                    ScrollableTabRow(selectedTabIndex = filters.indexOf(filter).coerceAtLeast(0),
+                        edgePadding = 0.dp) {
+                        filters.forEach { label ->
+                            Tab(selected = filter == label, onClick = { filter = label },
+                                text = { Text(label, maxLines = 1) })
+                        }
+                    }
+                    OutlinedTextField(search, onValueChange = { search = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Search ${section.title.lowercase()}") },
+                        trailingIcon = { if (search.isNotEmpty()) TextButton(onClick = { search = "" }) {
+                            Text("Clear")
+                        } })
+                    val shown = when (section) {
+                        Section.Applications -> appItems.size
+                        Section.Launchers -> launcherItems.size
+                        Section.Services -> serviceItems.size
+                    }
+                    Text("Shown: ${shown}", style = MaterialTheme.typography.labelMedium)
+                    HorizontalDivider()
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier.fillMaxSize()) {
+                        when (section) {
+                            Section.Applications -> items(appItems, key = { it.id }) { app ->
+                                AppRow(app.representative, selectedApp == app.id,
+                                    onClick = { selectedApp = app.id },
+                                    onOpen = { launch(app.representative) })
+                            }
+                            Section.Launchers -> items(launcherItems, key = { it.listKey }) { rec ->
+                                AppRow(rec, selectedLauncher == rec.listKey,
+                                    onClick = { selectedLauncher = rec.listKey },
+                                    onOpen = { launch(rec) })
+                            }
+                            Section.Services -> items(serviceItems, key = { it.key }) { service ->
+                                ServiceRow(service, selectedService == service.key) {
+                                    selectedService = service.key
+                                }
+                            }
                         }
                     }
                 }
             }
-            Surface(Modifier.width(370.dp).fillMaxHeight(), shape = RoundedCornerShape(16.dp), tonalElevation = 2.dp) {
+            Surface(Modifier.width(350.dp).fillMaxHeight(), shape = RoundedCornerShape(16.dp),
+                tonalElevation = 2.dp) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Details", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    val rec = selected
-                    if (rec == null) {
-                        Text("Select an application on the left", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        AppIcon(rec, size = 64)
-                        Text(rec.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Detail("Source", rec.group)
-                        Detail("Entry", rec.entry)
-                        Detail("Command", rec.exec.ifBlank { "—" })
-                        Detail("Desktop file", rec.path.ifBlank { "—" })
-                        if (rec.reason.isNotBlank()) Detail("Duplicate", rec.reason)
-                        HorizontalDivider()
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { action { LinuxBackend.launch(rec) } }, modifier = Modifier.weight(1f)) { Text("Launch") }
-                            OutlinedButton(onClick = { action { LinuxBackend.openFolder(rec) } }, modifier = Modifier.weight(1f), enabled = rec.path.isNotBlank()) { Text("Folder") }
+                    Text("Details", style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold)
+                    when (section) {
+                        Section.Applications -> {
+                            val app = apps.applications.firstOrNull { it.id == selectedApp }
+                            if (app == null) Text("Select an application")
+                            else {
+                                val rec = app.representative
+                                AppIcon(rec, 64)
+                                Text(app.name, fontWeight = FontWeight.Bold)
+                                Detail("Source", app.source)
+                                Detail("Application identity", app.id)
+                                Detail("Command", rec.exec.ifBlank { "—" })
+                                Detail("Related launchers", app.launchers.size.toString())
+                                if (app.launchers.isNotEmpty()) {
+                                    SelectionContainer {
+                                        Text(app.launchers.take(5).joinToString("\n") { it.path },
+                                            style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                                HorizontalDivider()
+                                Button(onClick = { launch(rec) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Launch")
+                                }
+                                if (app.source != "User") {
+                                    OutlinedButton(onClick = {
+                                        removing = RemoveRequest(rec, launcherOnly = false)
+                                    }, modifier = Modifier.fillMaxWidth()) { Text("Uninstall application") }
+                                } else {
+                                    Text("No package manager ownership is known. To remove a shortcut, " +
+                                        "use the Launchers section.", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
                         }
-                        OutlinedButton(onClick = { action { LinuxBackend.openEntry(rec) } },
-                            modifier = Modifier.fillMaxWidth(), enabled = rec.path.isNotBlank()) { Text("Open .desktop") }
-                        Button(onClick = { prompt = rec }, modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Uninstall / Remove") }
+                        Section.Launchers -> {
+                            val rec = apps.launchers.firstOrNull { it.listKey == selectedLauncher }
+                            if (rec == null) Text("Select a launcher")
+                            else {
+                                AppIcon(rec, 64)
+                                Text(rec.name, fontWeight = FontWeight.Bold)
+                                Detail("Source", rec.group)
+                                Detail("Desktop file", rec.path)
+                                Detail("Exec", rec.exec.ifBlank { "—" })
+                                HorizontalDivider()
+                                Button(onClick = { launch(rec) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Launch")
+                                }
+                                OutlinedButton(onClick = { openFolder(rec) },
+                                    modifier = Modifier.fillMaxWidth()) { Text("Open folder") }
+                                OutlinedButton(onClick = {
+                                    try { LinuxBackend.openEntry(rec) }
+                                    catch (e: Exception) { message = e.message ?: e.toString() }
+                                }, modifier = Modifier.fillMaxWidth()) { Text("Open .desktop") }
+                                if (LinuxBackend.isUserLauncher(rec)) {
+                                    OutlinedButton(onClick = {
+                                        removing = RemoveRequest(rec, launcherOnly = true)
+                                    }, modifier = Modifier.fillMaxWidth()) { Text("Delete launcher only") }
+                                }
+                            }
+                        }
+                        Section.Services -> {
+                            val unit = services?.services?.firstOrNull { it.key == selectedService }
+                            if (unit == null) Text("Select a service")
+                            else {
+                                Text(unit.name, fontWeight = FontWeight.Bold)
+                                Detail("Scope", unit.scope)
+                                Detail("Activity", unit.active)
+                                Detail("Runtime", unit.subState)
+                                Detail("Startup", unit.startup)
+                                Detail("Description", unit.description.ifBlank { "—" })
+                                HorizontalDivider()
+                                Text("Read-only. No service management actions are performed.",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                            services?.warnings?.takeIf { it.isNotEmpty() }?.let {
+                                HorizontalDivider()
+                                Text(it.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                     }
                     Spacer(Modifier.weight(1f))
-                    Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(status, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }
 
-    prompt?.let { rec ->
-        AlertDialog(onDismissRequest = { prompt = null }, title = { Text("Confirm removal") },
-            text = { SelectionContainer { Text("${rec.name}\n\n${LinuxBackend.uninstallDescription(rec)}\n\nContinue?") } },
+    removing?.let { request ->
+        AlertDialog(onDismissRequest = { removing = null },
+            title = { Text(if (request.launcherOnly) "Delete launcher" else "Uninstall application") },
+            text = { SelectionContainer {
+                Text(request.record.name + "\n\n" +
+                    if (request.launcherOnly)
+                        "Delete only the .desktop shortcut? Installed files are preserved."
+                    else LinuxBackend.uninstallDescription(request.record))
+            } },
             confirmButton = { TextButton(onClick = {
-                prompt = null
-                busy = true
+                removing = null
                 scope.launch {
                     try {
-                        val (ok, message) = withContext(Dispatchers.IO) { LinuxBackend.uninstall(rec) }
-                        info = if (ok) "Success:\n$message" else "Uninstall failed:\n$message"
-                    } catch (e: Exception) { info = "Uninstall failed: ${e.message}" }
-                    finally { busy = false; reload() }
+                        val (ok, result) = withContext(Dispatchers.IO) {
+                            if (request.launcherOnly) LinuxBackend.deleteUserLauncher(request.record)
+                            else LinuxBackend.uninstall(request.record)
+                        }
+                        message = if (ok) "Success:\n$result" else "Failed:\n$result"
+                        if (ok) refreshApps()
+                    } catch (e: Exception) { message = e.message ?: e.toString() }
                 }
-            }) { Text("Remove") } },
-            dismissButton = { TextButton(onClick = { prompt = null }) { Text("Cancel") } })
+            }) { Text(if (request.launcherOnly) "Delete" else "Uninstall") } },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
     }
-    info?.let { message ->
-        AlertDialog(onDismissRequest = { info = null }, title = { Text("Application Manager") },
-            text = { SelectionContainer { Text(message) } },
-            confirmButton = { TextButton(onClick = { info = null }) { Text("OK") } })
+    message?.let { content ->
+        AlertDialog(onDismissRequest = { message = null }, title = { Text("Application Manager") },
+            text = { SelectionContainer { Text(content) } },
+            confirmButton = { TextButton(onClick = { message = null }) { Text("OK") } })
+    }
+}
+
+@Composable
+private fun ServiceRow(service: SystemService, selected: Boolean, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().background(
+        if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        rowShape).clickable(onClick = onClick).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(if (service.isRunning) "●" else "○",
+            color = if (service.isRunning) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.weight(1f)) {
+            Text(service.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(service.description.ifBlank { service.subState }, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+        }
+        Text(service.scope, style = MaterialTheme.typography.labelSmall)
     }
 }
 

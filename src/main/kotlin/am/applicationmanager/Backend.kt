@@ -45,12 +45,29 @@ object LinuxBackend {
     )
     private val priority = mapOf("System" to 3, "Flatpak" to 3, "Snap" to 3, "User" to 2, "Wine" to 1, "Other" to 0)
 
+    /** Read stdout concurrently to avoid pipe-buffer deadlock for large systemctl lists. */
     fun command(vararg args: String, timeoutSeconds: Long = 25): Pair<Int, String> = try {
         val process = ProcessBuilder(*args).redirectErrorStream(true).start()
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+        val output = StringBuilder()
+        val reader = Thread {
+            try {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        if (output.length < 2_000_000) output.append(line).append('\n')
+                    }
+                }
+            } catch (_: Exception) { }
+        }
+        reader.isDaemon = true
+        reader.start()
+        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        if (!completed) {
             process.destroyForcibly()
-            -1 to "Command timed out"
-        } else process.exitValue() to process.inputStream.bufferedReader().readText()
+            process.waitFor(2, TimeUnit.SECONDS)
+        }
+        reader.join(2_000)
+        (if (completed) process.exitValue() else -1) to
+            (if (completed) output.toString() else "Command timed out")
     } catch (e: Exception) { -1 to (e.message ?: e.toString()) }
 
     fun start(vararg args: String) {
@@ -256,6 +273,21 @@ object LinuxBackend {
             if (pkg == null) "Package ownership cannot be determined; no files will be deleted."
             else "Remove system package: $pkg"
         }
+    }
+
+    fun isUserLauncher(rec: AppRecord): Boolean = try {
+        val target = File(rec.path).canonicalFile
+        val root = File(userDesktop).canonicalFile
+        target.isFile && target.extension.equals("desktop", true) &&
+            target.toPath().startsWith(root.toPath()) && target != root
+    } catch (_: Exception) { false }
+
+    /** Only removes a user-owned .desktop file, never the installed program. */
+    fun deleteUserLauncher(rec: AppRecord): Pair<Boolean, String> {
+        require(isUserLauncher(rec)) { "This is not a removable user launcher" }
+        val target = File(rec.path).canonicalFile
+        Files.delete(target.toPath())
+        return true to "Launcher deleted; program files preserved"
     }
 
     fun uninstall(rec: AppRecord): Pair<Boolean, String> {
