@@ -19,6 +19,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.rememberWindowState
 import androidx.compose.ui.window.application
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,7 +29,11 @@ import kotlinx.coroutines.withContext
 private val rowShape = RoundedCornerShape(10.dp)
 
 fun main() = application {
-    Window(onCloseRequest = ::exitApplication, title = "Application Manager") {
+    Window(
+        onCloseRequest = ::exitApplication,
+        title = "Application Manager",
+        state = rememberWindowState(placement = WindowPlacement.Maximized)
+    ) {
         MaterialTheme(colorScheme = darkColorScheme()) { ApplicationManager() }
     }
 }
