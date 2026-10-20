@@ -26,4 +26,5 @@ compose.desktop {
 dependencies {
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    implementation("com.github.weisj:jsvg:2.2.0")
 }

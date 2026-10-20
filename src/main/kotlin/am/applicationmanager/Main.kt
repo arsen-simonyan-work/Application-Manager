@@ -15,7 +15,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -24,8 +23,6 @@ import androidx.compose.ui.window.application
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import javax.imageio.ImageIO
 
 private val rowShape = RoundedCornerShape(10.dp)
 
@@ -177,25 +174,12 @@ private fun AppRow(rec: AppRecord, isSelected: Boolean, onClick: () -> Unit, onO
 
 @Composable
 private fun AppIcon(rec: AppRecord, size: Int) {
-    val image = remember(rec.icon) { resolveIcon(rec.icon) }
-    if (image != null) Image(image, contentDescription = null, modifier = Modifier.size(size.dp))
+    val image by produceState<ImageBitmap?>(null, rec.icon, rec.entry, rec.name) {
+        value = withContext(Dispatchers.IO) { LinuxIconResolver.resolve(rec) }
+    }
+    if (image != null) Image(image!!, contentDescription = null, modifier = Modifier.size(size.dp))
     else Box(Modifier.size(size.dp).background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp)),
         contentAlignment = Alignment.Center) { Text(rec.name.take(1).uppercase(), fontWeight = FontWeight.Bold) }
-}
-
-/** Java ImageIO supports PNG/JPEG/GIF. Unsupported SVG/XPM gets a safe fallback. */
-private fun resolveIcon(name: String): ImageBitmap? {
-    if (name.isBlank()) return null
-    val roots = listOf("/usr/share/pixmaps", "${System.getProperty("user.home")}/.icons") +
-        listOf(512, 256, 128, 64, 48, 32, 24, 16).flatMap { size ->
-            listOf("/usr/share/icons/hicolor/${size}x$size/apps",
-                "${System.getProperty("user.home")}/.local/share/icons/hicolor/${size}x$size/apps") }
-    val names = if (File(name).isAbsolute) listOf(File(name)) else roots.flatMap { root ->
-        listOf("$root/$name", "$root/$name.png", "$root/$name.jpg", "$root/$name.gif").map(::File) }
-    return names.firstNotNullOfOrNull { file ->
-        try { if (file.isFile && file.length() < 8_000_000) ImageIO.read(file)?.toComposeImageBitmap() else null }
-        catch (_: Exception) { null }
-    }
 }
 
 @Composable
