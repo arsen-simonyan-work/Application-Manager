@@ -1,187 +1,324 @@
 package am.applicationmanager
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-data class AppRecord(
-    val name: String, val group: String, val entry: String,
-    val exec: String, val path: String, val icon: String = "",
-    val reason: String = ""
-) {
-    val identity: String get() = if (path.isNotBlank()) "file:" + File(path).absolutePath
-        else "$group:$entry:$exec"
-}
+private val home = System.getProperty("user.home")
+private val userDesktop = "$home/.local/share/applications"
+private val flatpakUser = "$home/.local/share/flatpak/exports/share/applications"
+private val groups = listOf("System", "User", "Snap", "Flatpak", "Wine", "Other")
+val allTabs = listOf("All", "Unique", "Duplicates") + groups
 
-data class ScanResult(val all: List<AppRecord>, val unique: List<AppRecord>,
-                      val duplicates: List<AppRecord>) {
-    fun forTab(tab: String) = when(tab) {
+data class AppRecord(
+    val name: String,
+    val group: String,
+    val entry: String,
+    val exec: String,
+    val path: String,
+    val icon: String = "",
+    val reason: String = "",
+    /** Stable and unique within a scan; retained in duplicate copies and filtered tabs. */
+    val listKey: String = ""
+)
+
+data class ScanResult(val all: List<AppRecord>, val unique: List<AppRecord>, val duplicates: List<AppRecord>) {
+    fun forTab(tab: String): List<AppRecord> = when (tab) {
         "All" -> all
         "Unique" -> unique
         "Duplicates" -> duplicates
         else -> all.filter { it.group == tab }
     }
 }
-val tabs = listOf("All", "Unique", "Duplicates", "System", "User", "Snap", "Flatpak", "Wine")
 
+/** No shell interpolation: every external command is a separate argv element. */
 object LinuxBackend {
-    private val home = System.getProperty("user.home")
-    private val userDesktop = "$home/.local/share/applications"
     private val locations = listOf(
         "/usr/share/applications" to "System",
         "/usr/local/share/applications" to "System",
         userDesktop to "User",
         "/var/lib/snapd/desktop/applications" to "Snap",
         "/var/lib/flatpak/exports/share/applications" to "Flatpak",
-        "$home/.local/share/flatpak/exports/share/applications" to "Flatpak"
+        flatpakUser to "Flatpak"
     )
-    private fun command(vararg args: String): Pair<Int,String> = try {
-        val p=ProcessBuilder(*args).redirectErrorStream(true).start()
-        if (!p.waitFor(12, TimeUnit.SECONDS)) {
-            p.destroyForcibly()
-            -1 to "Timed out"
-        } else p.exitValue() to p.inputStream.bufferedReader().readText()
-    } catch (e:Exception) { -1 to (e.message ?: "Failed") }
-    private fun parse(file:File): Map<String,String> {
-        var section=""
-        val result=mutableMapOf<String,String>()
-        file.forEachLine(Charsets.UTF_8) { raw ->
-            val s=raw.trim()
-            if (s.startsWith("[") && s.endsWith("]")) section=s.substring(1,s.length-1)
-            else if (section=="Desktop Entry" && !s.startsWith("#")) {
-                val sep=s.indexOf('=')
-                if(sep>0) result[s.substring(0,sep).trim()]=s.substring(sep+1).trim()
-            }
-        }
-        return result
-    }
-    private fun localName(properties:Map<String,String>, fallback:String):String {
-        val locale=(System.getenv("LC_ALL")?.takeIf { it.isNotBlank() }
-            ?: System.getenv("LC_MESSAGES")?.takeIf { it.isNotBlank() }
-            ?: System.getenv("LANG") ?: Locale.getDefault().toString()).substringBefore('.')
-        return listOf(locale,locale.substringBefore('_')).firstNotNullOfOrNull {
-            properties["Name[$it]"]?.takeIf(String::isNotBlank)
-        } ?: properties["Name"]?.takeIf(String::isNotBlank) ?: fallback
-    }
-    private fun desktop():List<AppRecord> = locations.flatMap { (folder, origin) ->
-        File(folder).listFiles { f -> f.isFile && f.extension=="desktop" }.orEmpty()
-            .mapNotNull { file ->
-                try {
-                    val m=parse(file)
-                    if (m["Hidden"].equals("true",true) || m["NoDisplay"].equals("true",true)
-                        || m["Type"]?.let { it!="Application" }==true) null
-                    else {
-                        val group=when {
-                            file.path.contains("/applications/wine/") -> "Wine"
-                            origin=="System" && file.name.startsWith("snap-") -> "Snap"
-                            else -> origin
-                        }
-                        AppRecord(localName(m,file.nameWithoutExtension),group,file.name,
-                            m["Exec"].orEmpty(),file.absolutePath,m["Icon"].orEmpty())
+    private val priority = mapOf("System" to 3, "Flatpak" to 3, "Snap" to 3, "User" to 2, "Wine" to 1, "Other" to 0)
+
+    /** Read stdout concurrently to avoid pipe-buffer deadlock for large systemctl lists. */
+    fun command(vararg args: String, timeoutSeconds: Long = 25): Pair<Int, String> = try {
+        val process = ProcessBuilder(*args).redirectErrorStream(true).start()
+        val output = StringBuilder()
+        val reader = Thread {
+            try {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        if (output.length < 2_000_000) output.append(line).append('\n')
                     }
-                } catch (_:Exception) { null }
-            }
-    }
-    private fun flatpaks():List<AppRecord> {
-        // The name column is user-facing; the application column is the stable ID.
-        val (status,out)=command("flatpak","list","--app","--columns=application,name")
-        if(status!=0) return emptyList()
-        return out.lines().mapNotNull { line ->
-            val columns=line.trim().split('\t')
-            val id=columns.firstOrNull()?.trim().orEmpty()
-            if(id.isBlank()) null else AppRecord(columns.getOrNull(1)?.trim()?.ifBlank { id } ?: id,
-                "Flatpak","$id.flatpakref","flatpak run $id","","")
-        }
-    }
-    private fun snaps():List<AppRecord> {
-        val (status,out)=command("snap","list")
-        if(status!=0) return emptyList()
-        return out.lines().drop(1).mapNotNull { line ->
-            val id=line.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
-            if (id.isBlank()) null else AppRecord(id,"Snap","$id.snap","snap run $id","")
-        }
-    }
-    fun scan():ScanResult {
-        // Wine Program Files directories are NOT applications. Only actual desktop launchers are indexed.
-        val apps=(desktop()+flatpaks()+snaps()).distinctBy { it.identity }
-            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
-        val unique=linkedMapOf<String,AppRecord>()
-        val duplicate=mutableListOf<AppRecord>()
-        apps.forEach { app ->
-            val key=app.name.trim().lowercase(Locale.ROOT)
-            val prior=unique[key]
-            if(prior==null) unique[key]=app
-            else duplicate.add(app.copy(reason="Also listed as ${prior.group}"))
-        }
-        return ScanResult(apps,unique.values.toList(),duplicate)
-    }
-    private fun tokens(input:String):List<String> {
-        val out=mutableListOf<String>()
-        val current=StringBuilder()
-        var quoted=false
-        var escape=false
-        for(ch in input) {
-            when {
-                escape -> {current.append(ch);escape=false}
-                ch=='\\' -> escape=true
-                ch=='"' -> quoted=!quoted
-                ch.isWhitespace() && !quoted -> {
-                    if(current.isNotEmpty()) {out.add(current.toString());current.clear()}
                 }
-                else -> current.append(ch)
+            } catch (_: Exception) { }
+        }
+        reader.isDaemon = true
+        reader.start()
+        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        if (!completed) {
+            process.destroyForcibly()
+            process.waitFor(2, TimeUnit.SECONDS)
+        }
+        reader.join(2_000)
+        (if (completed) process.exitValue() else -1) to
+            (if (completed) output.toString() else "Command timed out")
+    } catch (e: Exception) { -1 to (e.message ?: e.toString()) }
+
+    fun start(vararg args: String) {
+        ProcessBuilder(*args).redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectError(ProcessBuilder.Redirect.DISCARD).start()
+    }
+
+    private fun bool(value: String?) = value.equals("true", true) || value.equals("1") || value.equals("yes", true)
+
+    private fun parseDesktop(file: File): Map<String, String> {
+        var section = ""
+        val map = mutableMapOf<String, String>()
+        file.forEachLine(Charsets.UTF_8) { original ->
+            val line = original.trim()
+            if (line.startsWith("[") && line.endsWith("]")) section = line.removeSurrounding("[", "]")
+            else if (section == "Desktop Entry" && !line.startsWith("#")) {
+                val index = line.indexOf('=')
+                if (index > 0) map[line.substring(0, index).trim()] = line.substring(index + 1).trim()
             }
         }
-        if(current.isNotEmpty()) out.add(current.toString())
-        return out.filterNot { it.matches(Regex("%[a-zA-Z]")) }
-            .map { it.replace(Regex("%[a-zA-Z]"),"") }.filter(String::isNotBlank)
+        return map
     }
-    fun launch(app:AppRecord) {
-        val argv=when {
-            app.group=="Flatpak" -> listOf("flatpak","run",app.entry.removeSuffix(".flatpakref"))
-            app.group=="Snap" -> listOf("snap","run",app.entry.removeSuffix(".snap"))
-            app.exec.isNotBlank() -> tokens(app.exec)
+
+    private fun localized(fields: Map<String, String>, key: String): String {
+        val userLang = System.getenv("LANGUAGE")?.substringBefore(':')
+            ?: System.getenv("LC_ALL")?.takeIf { it.isNotBlank() }
+            ?: System.getenv("LANG") ?: Locale.getDefault().toString()
+        val lang = userLang.substringBefore('.')
+        return listOf(lang, lang.substringBefore('_'), "en_US", "en")
+            .firstNotNullOfOrNull { fields["$key[$it]"]?.takeIf(String::isNotBlank) }
+            ?: fields[key].orEmpty()
+    }
+
+    /** Quote-aware Linux desktop Exec tokenizer. Removes % field codes and supports quoted paths. */
+    fun tokenize(input: String): List<String> {
+        val parts = mutableListOf<String>()
+        val token = StringBuilder()
+        var quote = '\u0000'
+        var escape = false
+        var active = false
+        for (ch in input) {
+            if (escape) { token.append(ch); escape = false; active = true; continue }
+            if (ch == '\\' && quote != '\'') { escape = true; active = true; continue }
+            if ((ch == '"' || ch == '\'') && (quote == '\u0000' || quote == ch)) {
+                quote = if (quote == '\u0000') ch else '\u0000'; active = true; continue
+            }
+            if (ch.isWhitespace() && quote == '\u0000') {
+                if (active) { parts.add(token.toString()); token.clear(); active = false }
+            } else { token.append(ch); active = true }
+        }
+        if (active) parts.add(token.toString())
+        return parts.filter { it.isNotBlank() && !it.matches(Regex("%[fFuUdDnNickvm]")) }
+            .map { it.replace("%%", "%").replace(Regex("%[fFuUdDnNickvm]"), "") }.filter(String::isNotBlank)
+    }
+
+    private fun launchTokens(exec: String): List<String> {
+        val tokens = tokenize(exec)
+        if (tokens.firstOrNull() != "env") return tokens
+        val firstCommand = tokens.drop(1).indexOfFirst { !it.contains('=') && !it.startsWith("-") }
+        return if (firstCommand >= 0) tokens.drop(firstCommand + 1) else emptyList()
+    }
+
+    /** Only .desktop launchers represent applications, never arbitrary directories. */
+    private fun desktopRecord(file: File, group: String): AppRecord? {
+        val fields = parseDesktop(file)
+        if (fields["Type"]?.let { it != "Application" } == true ||
+            bool(fields["NoDisplay"]) || bool(fields["Hidden"])) return null
+        val exec = fields["Exec"].orEmpty()
+        val executable = launchTokens(exec).firstOrNull()
+        if (executable?.startsWith('/') == true && !File(executable).exists()) return null
+        return AppRecord(
+            localized(fields, "Name").ifBlank { file.nameWithoutExtension },
+            group, file.name, exec, file.absolutePath, fields["Icon"].orEmpty()
+        )
+    }
+
+    private fun desktopEntries(): List<AppRecord> = locations.flatMap { (folder, group) ->
+        File(folder).listFiles { file -> file.isFile && file.extension.equals("desktop", ignoreCase = true) }
+            ?.toList().orEmpty().mapNotNull { file ->
+                try { desktopRecord(file, group) } catch (_: Exception) { null }
+            }
+    }
+
+    private fun snapEntries(): List<AppRecord> {
+        val (code, output) = command("snap", "list")
+        if (code != 0) return emptyList()
+        return output.lines().drop(1).mapNotNull { line ->
+            val name = line.trim().split(Regex("\\s+")).firstOrNull()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            AppRecord(name, "Snap", "$name.snap", "snap run $name", "")
+        }
+    }
+
+    private fun flatpakEntries(): List<AppRecord> {
+        // Ask Flatpak for its user-facing name as well as the stable application ID.
+        val (code, output) = command("flatpak", "list", "--app", "--columns=application,name")
+        if (code != 0) return emptyList()
+        return output.lines().mapNotNull { line ->
+            val columns = line.trim().split('\t', limit = 2)
+            val id = columns.firstOrNull()?.trim().orEmpty()
+            if (id.isBlank()) null
+            else AppRecord(columns.getOrNull(1)?.trim()?.takeIf(String::isNotBlank) ?: id,
+                "Flatpak", "$id.flatpakref", "flatpak run $id", "")
+        }
+    }
+
+    private fun wineEntries(): List<AppRecord> {
+        // Wine's Program Files folders include shared components such as "Common Files".
+        // Scan actual Wine-created .desktop launchers instead of guessing from folders.
+        val wineLaunchers = File(userDesktop, "wine")
+        if (!wineLaunchers.isDirectory) return emptyList()
+        return wineLaunchers.walkTopDown().maxDepth(8)
+            .filter { it.isFile && it.extension.equals("desktop", ignoreCase = true) }
+            .mapNotNull { file ->
+                try { desktopRecord(file, "Wine") } catch (_: Exception) { null }
+            }.toList()
+    }
+
+    fun scan(onProgress: (Int, Int) -> Unit = { _, _ -> }): ScanResult {
+        val records = (desktopEntries() + snapEntries() + flatpakEntries() + wineEntries())
+            .sortedWith(compareBy<AppRecord> { it.name.lowercase(Locale.ROOT) }
+                .thenBy { it.group }.thenBy { it.path }.thenBy { it.entry }.thenBy { it.exec })
+            .mapIndexed { index, rec -> rec.copy(listKey = "$index|${rec.group}|${rec.path}|${rec.entry}") }
+        val unique = linkedMapOf<Pair<String, String>, AppRecord>()
+        val duplicates = mutableListOf<AppRecord>()
+        records.forEachIndexed { index, rec ->
+            val key = rec.name.trim().lowercase() to rec.exec.trim().lowercase()
+            val previous = unique[key]
+            if (previous == null) unique[key] = rec
+            else if ((priority[rec.group] ?: 0) > (priority[previous.group] ?: 0)) {
+                duplicates.add(previous.copy(reason = "Replaced by ${rec.group}"))
+                unique[key] = rec
+            } else duplicates.add(rec.copy(reason = "Duplicate of ${previous.group}"))
+            onProgress(index + 1, records.size)
+        }
+        return ScanResult(records, unique.values.sortedBy { it.name.lowercase() }, duplicates)
+    }
+
+    fun launch(rec: AppRecord) {
+        val args = when {
+            rec.exec.isNotBlank() -> launchTokens(rec.exec)
+            rec.group == "Snap" -> listOf("snap", "run", nativeId(rec))
+            rec.group == "Flatpak" -> listOf("flatpak", "run", nativeId(rec))
+            rec.group == "Wine" -> listOf("wine", "uninstaller")
             else -> emptyList()
         }
-        require(argv.isNotEmpty()) { "No launch command" }
-        ProcessBuilder(argv).start()
+        require(args.isNotEmpty()) { "No launch command available" }
+        start(*args.toTypedArray())
     }
-    fun openEntry(app:AppRecord) {
-        require(app.path.isNotBlank()) { "No desktop file" }
-        ProcessBuilder("xdg-open",app.path).start()
+
+    fun openFolder(rec: AppRecord) {
+        require(rec.path.isNotBlank()) { "No desktop file associated with this entry" }
+        val file = File(rec.path)
+        val candidates = listOf(listOf("nautilus", "--select", file.path),
+            listOf("dolphin", "--select", file.path), listOf("nemo", "--browser", "--select", file.path),
+            listOf("thunar", "--select", file.path), listOf("xdg-open", file.parent))
+        for (args in candidates) try { start(*args.toTypedArray()); return } catch (_: Exception) { }
+        error("No file manager found")
     }
-    fun openFolder(app:AppRecord) {
-        require(app.path.isNotBlank()) { "No desktop file" }
-        ProcessBuilder("xdg-open",File(app.path).parent).start()
+
+    fun openEntry(rec: AppRecord) {
+        require(rec.path.isNotBlank()) { "No .desktop file associated with this entry" }
+        start("xdg-open", rec.path)
     }
-    fun uninstallDescription(app:AppRecord):String = when(app.group) {
-        "Flatpak" -> "Uninstall Flatpak ${app.entry.removeSuffix(".flatpakref")}?"
-        "Snap" -> "Remove Snap ${app.entry.removeSuffix(".snap")}?"
-        "Wine" -> "Open Wine uninstaller?"
-        "User" -> "Delete this user launcher only? Application files will be preserved."
-        else -> "System packages must be removed with the system package manager."
-    }
-    fun uninstall(app:AppRecord):Pair<Boolean,String> = try {
-        when(app.group) {
-            "User" -> {
-                val file=File(app.path).canonicalFile
-                val base=File(userDesktop).canonicalFile
-                require(file.toPath().startsWith(base.toPath()) && file.extension=="desktop")
-                val done=file.delete()
-                done to if(done) "Launcher removed" else "Failed to remove launcher"
-            }
-            "Flatpak" -> {
-                val (code,out)=command("flatpak","uninstall","--noninteractive",app.entry.removeSuffix(".flatpakref"))
-                (code==0) to out
-            }
-            "Snap" -> {
-                val (code,out)=command("snap","remove",app.entry.removeSuffix(".snap"))
-                (code==0) to out
-            }
-            "Wine" -> {
-                ProcessBuilder("wine","uninstaller").start()
-                true to "Wine uninstaller opened"
-            }
-            else -> false to "Use your system package manager for system applications."
+
+    private fun owningPackage(path: String): String? {
+        if (path.isBlank()) return null
+        if (available("dpkg")) {
+            val (status, output) = command("dpkg", "-S", path)
+            if (status == 0) return output.lineSequence().firstOrNull()?.substringBefore(':')?.trim()?.takeIf(String::isNotBlank)
         }
-    } catch(e:Exception) {false to (e.message ?: e.toString())}
+        if (available("rpm")) {
+            val (status, output) = command("rpm", "-qf", "--queryformat", "%{NAME}", path)
+            if (status == 0) return output.trim().takeIf(String::isNotBlank)
+        }
+        if (available("pacman")) {
+            val (status, output) = command("pacman", "-Qo", path)
+            if (status == 0) return output.substringAfter(" is owned by ", "").substringBefore(' ').takeIf(String::isNotBlank)
+        }
+        return null
+    }
+
+    private fun available(binary: String): Boolean = (System.getenv("PATH") ?: "")
+        .split(File.pathSeparator).any { File(it, binary).canExecute() }
+
+    private fun nativeId(rec: AppRecord): String {
+        val tokens = launchTokens(rec.exec)
+        if (rec.group == "Snap") {
+            val snapIdx = tokens.indexOf("snap")
+            if (snapIdx >= 0 && tokens.getOrNull(snapIdx + 1) == "run") return tokens.getOrNull(snapIdx + 2)?.substringBefore('.') ?: rec.name
+            return rec.entry.removeSuffix(".desktop").removeSuffix(".snap").substringBefore('_')
+        }
+        return rec.entry.removeSuffix(".desktop").removeSuffix(".flatpakref").ifBlank { rec.name }
+    }
+
+    fun uninstallDescription(rec: AppRecord): String = when (rec.group) {
+        "Snap" -> "Remove Snap package: ${nativeId(rec)}"
+        "Flatpak" -> "Remove Flatpak application: ${nativeId(rec)}"
+        "Wine" -> "Open Wine uninstaller (select the application there)"
+        "User" -> "Remove user launcher: ${rec.path}\n(Installed application files are not deleted automatically.)"
+        else -> {
+            val exec = launchTokens(rec.exec).firstOrNull { it.startsWith('/') }
+            val pkg = owningPackage(exec ?: rec.path)
+            if (pkg == null) "Package ownership cannot be determined; no files will be deleted."
+            else "Remove system package: $pkg"
+        }
+    }
+
+    fun isUserLauncher(rec: AppRecord): Boolean = try {
+        val target = File(rec.path).canonicalFile
+        val root = File(userDesktop).canonicalFile
+        target.isFile && target.extension.equals("desktop", true) &&
+            target.toPath().startsWith(root.toPath()) && target != root
+    } catch (_: Exception) { false }
+
+    /** Only removes a user-owned .desktop file, never the installed program. */
+    fun deleteUserLauncher(rec: AppRecord): Pair<Boolean, String> {
+        require(isUserLauncher(rec)) { "This is not a removable user launcher" }
+        val target = File(rec.path).canonicalFile
+        Files.delete(target.toPath())
+        return true to "Launcher deleted; program files preserved"
+    }
+
+    fun uninstall(rec: AppRecord): Pair<Boolean, String> {
+        if (rec.group == "Wine") {
+            start("wine", "uninstaller")
+            return true to "Wine uninstaller opened"
+        }
+        if (rec.group == "User") {
+            val target = File(rec.path)
+            val allowed = Path.of(userDesktop).toAbsolutePath().normalize()
+            require(target.toPath().toAbsolutePath().normalize().startsWith(allowed)) { "Unsafe user launcher path" }
+            require(target.extension == "desktop") { "Only .desktop launchers can be removed" }
+            Files.delete(target.toPath())
+            return true to "User launcher removed (application files preserved)"
+        }
+        val args = when (rec.group) {
+            "Snap" -> listOf("snap", "remove", nativeId(rec))
+            "Flatpak" -> listOf("flatpak", "uninstall", "-y", nativeId(rec))
+            else -> {
+                val exec = launchTokens(rec.exec).firstOrNull { it.startsWith('/') }
+                val pkg = owningPackage(exec ?: rec.path) ?: return false to "Owning system package not found"
+                when {
+                    available("apt") -> listOf("pkexec", "apt", "remove", "-y", pkg)
+                    available("dnf") -> listOf("pkexec", "dnf", "remove", "-y", pkg)
+                    available("pacman") -> listOf("pkexec", "pacman", "-Rns", "--noconfirm", pkg)
+                    available("zypper") -> listOf("pkexec", "zypper", "-n", "rm", pkg)
+                    else -> return false to "Unsupported package manager"
+                }
+            }
+        }
+        val (code, output) = command(*args.toTypedArray(), timeoutSeconds = 600)
+        return (code == 0) to output.ifBlank { if (code == 0) "Completed" else "Command failed ($code)" }
+    }
 }

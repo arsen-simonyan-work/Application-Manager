@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # The old jpackage installer created an untracked duplicate via xdg-desktop-menu.
+        rm -f "${DPKG_ROOT:-}/usr/local/share/applications/application-manager-application-manager.desktop" \
+              "${DPKG_ROOT:-}/usr/share/applications/application-manager-application-manager.desktop"
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database -q "${DPKG_ROOT:-}/usr/share/applications" || true
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>am.applicationmanager.ApplicationManager</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Application-Manager</name>
+  <summary>Manage installed Linux applications, launchers and services</summary>
+  <url type="homepage">https://github.com/arsen-simonyan-work/Application-Manager</url>
+  <description>
+    <p>Application Manager lists installed graphical applications, desktop launchers and systemd services. It can launch applications and remove applications or user-owned launchers after confirmation.</p>
+  </description>
+  <launchable type="desktop-id">am.applicationmanager.ApplicationManager.desktop</launchable>
+  <icon type="stock">am.applicationmanager.ApplicationManager</icon>
+  <categories>
+    <category>System</category>
+  </categories>
+</component>
