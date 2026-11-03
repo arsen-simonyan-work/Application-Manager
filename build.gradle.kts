@@ -75,11 +75,31 @@ val linuxPackagingDir = layout.projectDirectory.dir("packaging/linux")
 val fixLinuxDebScript = layout.projectDirectory.file("tools/fix-linux-deb.sh")
 val appIcon = layout.projectDirectory.file("src/main/resources/app-icon.png")
 val appVersion = project.version.toString()
+val linuxIconsDirectory = layout.buildDirectory.dir("linux-icons")
+val prepareLinuxIconsScript = layout.projectDirectory.file("tools/PrepareLinuxIcons.java")
+
+val prepareLinuxIcons = tasks.register("prepareLinuxIcons") {
+    inputs.file(appIcon)
+    inputs.file(prepareLinuxIconsScript)
+    outputs.dir(linuxIconsDirectory)
+    doLast {
+        packagingServices.execOperations.exec {
+            commandLine(
+                file("${packagingJavaHome.get()}/bin/java").absolutePath,
+                "-Djava.awt.headless=true", prepareLinuxIconsScript.asFile.absolutePath,
+                appIcon.asFile.absolutePath, linuxIconsDirectory.get().asFile.absolutePath,
+                "am.applicationmanager.ApplicationManager",
+            )
+        }.assertNormalExitValue()
+    }
+}
 
 tasks.withType<AbstractJPackageTask>().configureEach {
     if (targetFormat == TargetFormat.Deb) {
+        dependsOn(prepareLinuxIcons)
         inputs.dir(linuxPackagingDir)
         inputs.file(fixLinuxDebScript)
+        inputs.dir(linuxIconsDirectory)
         doLast {
             val deb = destinationDir.get().asFile.listFiles()
                 .orEmpty().single { it.extension == "deb" }
@@ -88,6 +108,7 @@ tasks.withType<AbstractJPackageTask>().configureEach {
                     "bash", fixLinuxDebScript.asFile.absolutePath,
                     deb.absolutePath, appIcon.asFile.absolutePath,
                     linuxPackagingDir.asFile.absolutePath, appVersion,
+                    linuxIconsDirectory.get().asFile.absolutePath,
                 )
             }.assertNormalExitValue()
         }

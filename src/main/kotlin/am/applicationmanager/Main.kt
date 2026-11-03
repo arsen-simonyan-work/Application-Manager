@@ -32,12 +32,18 @@ private val rowShape = RoundedCornerShape(10.dp)
 fun main() {
     configureLinuxWindowClass()
     application {
+        val windowState = rememberWindowState(
+            placement = WindowPlacement.Maximized,
+            width = 1280.dp,
+            height = 800.dp,
+        )
         Window(
             onCloseRequest = ::exitApplication,
             title = "${AppMetadata.NAME} v${AppMetadata.VERSION}",
             icon = painterResource("app-icon.png"),
-            state = rememberWindowState(placement = WindowPlacement.Maximized)
+            state = windowState,
         ) {
+            MaximizeOnFirstShow(windowState)
             MaterialTheme(colorScheme = ApplicationManagerColors) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),

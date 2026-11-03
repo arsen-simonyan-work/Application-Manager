@@ -24,13 +24,14 @@ It also keeps upgrades associated with the existing installed package.
 
 `packageDeb` and `packageReleaseDeb` both run `tools/fix-linux-deb.sh` after
 `jpackage`. The script adds the desktop entry to `/usr/share/applications`,
-the unchanged transparent PNG to `/usr/share/pixmaps`, and AppStream metadata
+the unchanged transparent PNG to `/usr/share/pixmaps`, sized PNG icons to
+`/usr/share/icons/hicolor`, and AppStream metadata
 to `/usr/share/metainfo`. All three use the same application ID. The window's
 `WM_CLASS` matches the desktop entry's `StartupWMClass`.
 
 The package owns these integration files directly. The installation scripts
 remove the old duplicate `application-manager-application-manager.desktop` and
-refresh the desktop database after installation and removal.
+refresh the desktop database and icon theme cache after installation and removal.
 
 The icon shown for a `.deb` file by a file manager is determined by the desktop's
 package MIME type; the application icon is supplied for the launcher, window

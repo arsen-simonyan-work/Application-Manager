@@ -9,6 +9,13 @@ case "$1" in
         if command -v update-desktop-database >/dev/null 2>&1; then
             update-desktop-database -q "${DPKG_ROOT:-}/usr/share/applications" || true
         fi
+        icon_theme="${DPKG_ROOT:-}/usr/share/icons/hicolor"
+        if [ -d "$icon_theme" ]; then
+            touch "$icon_theme"
+            if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+                gtk-update-icon-cache -q -t -f "$icon_theme" || true
+            fi
+        fi
         ;;
 esac
 

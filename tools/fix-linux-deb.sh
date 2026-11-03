@@ -5,11 +5,13 @@ deb_file=${1:?DEB file path is required}
 icon_file=${2:?PNG icon path is required}
 packaging_dir=${3:?Linux packaging directory is required}
 app_version=${4:?Application version is required}
+icons_dir=${5:?Generated Linux icons directory is required}
 app_id=am.applicationmanager.ApplicationManager
 
 test -f "$deb_file"
 test -f "$icon_file"
 test -d "$packaging_dir"
+test -d "$icons_dir"
 test "$(dpkg-deb --field "$deb_file" Package)" = application-manager
 deb_version=$(dpkg-deb --field "$deb_file" Version)
 case "$deb_version" in
@@ -32,10 +34,16 @@ install -Dm644 "$packaging_dir/$app_id.desktop" \
 install -Dm644 "$packaging_dir/$app_id.metainfo.xml" \
     "$package_root/usr/share/metainfo/$app_id.metainfo.xml"
 
-# A stock icon in pixmaps is available to GNOME and software centers at any size.
-# Keep the supplied RGBA PNG byte-for-byte, including its transparent background.
+# Keep the supplied RGBA PNG unchanged as a fallback and the native window icon.
 install -Dm644 "$icon_file" "$package_root/usr/share/pixmaps/$app_id.png"
 install -m644 "$icon_file" "$app_dir/lib/Application-Manager.png"
+
+# GNOME uses the standard hicolor theme and its cache for menu and dock icons.
+while IFS= read -r -d '' icon; do
+    relative=${icon#"$icons_dir"/}
+    install -Dm644 "$icon" "$package_root/usr/share/icons/hicolor/$relative"
+done < <(find "$icons_dir" -mindepth 3 -maxdepth 3 -type f -name "$app_id.png" -print0)
+test -f "$package_root/usr/share/icons/hicolor/256x256/apps/$app_id.png"
 
 for script in postinst prerm postrm; do
     install -m755 "$packaging_dir/$script" "$package_root/DEBIAN/$script"

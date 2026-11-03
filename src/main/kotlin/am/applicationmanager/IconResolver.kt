@@ -76,16 +76,24 @@ internal object LinuxIconResolver {
         if (file.isAbsolute) return withExtensions(file).firstNotNullOfOrNull(::decode)
         val files = LinkedHashSet<File>()
         roots.forEach { root -> withExtensions(File(root, file.path)).forEach(files::add) }
-        indexed[file.nameWithoutExtension.ifBlank { file.name }.lowercase(Locale.ROOT)]
+        val imageExtension = file.extension.lowercase(Locale.ROOT) in extensions
+        val iconName = if (imageExtension) file.nameWithoutExtension.ifBlank { file.name } else file.name
+        indexed[iconName.lowercase(Locale.ROOT)]
             .orEmpty().forEach(files::add)
-        return files.asSequence().sortedWith(compareBy<File>(
-            { themeRank(it) }, { sizeRank(it) }, { it.absolutePath }))
-            .firstNotNullOfOrNull(::decode)
+        return decodePreferred(files) ?: if (!imageExtension && file.extension.isNotBlank()) {
+            // Retain the old shortened-name fallback after trying the complete icon ID.
+            decodePreferred(indexed[file.nameWithoutExtension.lowercase(Locale.ROOT)].orEmpty())
+        } else null
     }
 
     private fun withExtensions(file: File): List<File> =
-        if (file.extension.isNotBlank()) listOf(file)
+        if (file.extension.lowercase(Locale.ROOT) in extensions) listOf(file)
         else listOf(file) + extensions.map { ext -> File(file.path + "." + ext) }
+
+    private fun decodePreferred(files: Iterable<File>): ImageBitmap? =
+        files.asSequence().sortedWith(compareBy<File>(
+            { themeRank(it) }, { sizeRank(it) }, { it.absolutePath }))
+            .firstNotNullOfOrNull(::decode)
 
     private fun themeRank(file: File): Int {
         val path = file.absolutePath.lowercase(Locale.ROOT)
