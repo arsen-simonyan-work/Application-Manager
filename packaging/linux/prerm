@@ -1,0 +1,3 @@
+#!/bin/sh
+# Desktop entries and icons are owned by dpkg; no xdg-desktop-menu copies are needed.
+exit 0

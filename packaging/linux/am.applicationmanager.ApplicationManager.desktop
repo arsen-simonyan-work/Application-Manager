@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Application Manager
+Comment=Manage installed Linux applications, launchers and services
+Exec=/opt/application-manager/bin/Application-Manager
+Icon=am.applicationmanager.ApplicationManager
+Terminal=false
+Categories=System;
+StartupWMClass=am.applicationmanager.ApplicationManager

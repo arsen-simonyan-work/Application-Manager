@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -28,18 +29,22 @@ import kotlinx.coroutines.withContext
 
 private val rowShape = RoundedCornerShape(10.dp)
 
-fun main() = application {
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "Application Manager",
-        state = rememberWindowState(placement = WindowPlacement.Maximized)
-    ) {
-        MaterialTheme(colorScheme = darkColorScheme()) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = MaterialTheme.colorScheme.background
-            ) {
-                ApplicationManager()
+fun main() {
+    configureLinuxWindowClass()
+    application {
+        Window(
+            onCloseRequest = ::exitApplication,
+            title = "${AppMetadata.NAME} v${AppMetadata.VERSION}",
+            icon = painterResource("app-icon.png"),
+            state = rememberWindowState(placement = WindowPlacement.Maximized)
+        ) {
+            MaterialTheme(colorScheme = ApplicationManagerColors) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    ApplicationManager()
+                }
             }
         }
     }
