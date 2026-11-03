@@ -68,9 +68,13 @@ private fun ApplicationManager() {
     var appBusy by remember { mutableStateOf(false) }
     var serviceBusy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Ready") }
-    var message by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<FeedbackMessage?>(null) }
     var removing by remember { mutableStateOf<RemoveRequest?>(null) }
     val scope = rememberCoroutineScope()
+
+    fun reportError(title: String, summary: String, error: Exception) {
+        message = FeedbackMessage(title, summary, error.message ?: error.toString(), FeedbackKind.Error)
+    }
 
     fun refreshApps() {
         if (appBusy) return
@@ -80,7 +84,9 @@ private fun ApplicationManager() {
             try {
                 apps = withContext(Dispatchers.IO) { CatalogScanner.from(LinuxBackend.scan()) }
                 status = "${apps.applications.size} applications, ${apps.launchers.size} launchers"
-            } catch (e: Exception) { message = e.message ?: e.toString() }
+            } catch (e: Exception) {
+                reportError("Could not load applications", "The application list could not be updated. Try scanning again.", e)
+            }
             finally { appBusy = false }
         }
     }
@@ -92,17 +98,23 @@ private fun ApplicationManager() {
             try {
                 services = withContext(Dispatchers.IO) { ServiceScanner.scan() }
                 status = "${services?.services?.size ?: 0} systemd services"
-            } catch (e: Exception) { message = e.message ?: e.toString() }
+            } catch (e: Exception) {
+                reportError("Could not load services", "The system services could not be loaded. Try scanning again.", e)
+            }
             finally { serviceBusy = false }
         }
     }
     fun launch(rec: AppRecord) {
         try { LinuxBackend.launch(rec) }
-        catch (e: Exception) { message = e.message ?: e.toString() }
+        catch (e: Exception) {
+            reportError("Could not launch application", "“${rec.name}” could not be started.", e)
+        }
     }
     fun openFolder(rec: AppRecord) {
         try { LinuxBackend.openFolder(rec) }
-        catch (e: Exception) { message = e.message ?: e.toString() }
+        catch (e: Exception) {
+            reportError("Could not open folder", "The folder for “${rec.name}” could not be opened.", e)
+        }
     }
 
     LaunchedEffect(Unit) { refreshApps() }
@@ -285,7 +297,9 @@ private fun ApplicationManager() {
                                     modifier = Modifier.fillMaxWidth()) { Text("Open folder") }
                                 OutlinedButton(onClick = {
                                     try { LinuxBackend.openEntry(rec) }
-                                    catch (e: Exception) { message = e.message ?: e.toString() }
+                                    catch (e: Exception) {
+                                        reportError("Could not open shortcut", "The shortcut for “${rec.name}” could not be opened.", e)
+                                    }
                                 }, modifier = Modifier.fillMaxWidth()) { Text("Open .desktop") }
                                 if (LinuxBackend.isUserLauncher(rec)) {
                                     OutlinedButton(onClick = {
@@ -339,17 +353,17 @@ private fun ApplicationManager() {
                             if (request.launcherOnly) LinuxBackend.deleteUserLauncher(request.record)
                             else LinuxBackend.uninstall(request.record)
                         }
-                        message = if (ok) "Success:\n$result" else "Failed:\n$result"
+                        message = removalFeedback(request.record, request.launcherOnly, ok, result)
                         if (ok) refreshApps()
-                    } catch (e: Exception) { message = e.message ?: e.toString() }
+                    } catch (e: Exception) {
+                        message = removalFeedback(request.record, request.launcherOnly, false, e.message ?: e.toString())
+                    }
                 }
             }) { Text(if (request.launcherOnly) "Delete" else "Uninstall") } },
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } })
     }
     message?.let { content ->
-        AlertDialog(onDismissRequest = { message = null }, title = { Text("Application Manager") },
-            text = { SelectionContainer { Text(content) } },
-            confirmButton = { TextButton(onClick = { message = null }) { Text("OK") } })
+        FeedbackDialog(content, onDismiss = { message = null })
     }
 }
 
